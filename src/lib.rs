@@ -1,7 +1,9 @@
 use futures::SinkExt;
 use serde::{Deserialize, Serialize};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    net::UdpSocket,
     sync::mpsc,
 };
 use tokio_stream::StreamExt;
@@ -80,4 +82,68 @@ where
 
         (their_tx, their_rx)
     }
+}
+
+type UdpMessagePair<T> = (T, SocketAddr);
+
+pub fn udp_into_channels<T>(
+    socket: UdpSocket,
+) -> (
+    mpsc::Sender<UdpMessagePair<T>>,
+    mpsc::Receiver<UdpMessagePair<T>>,
+)
+where
+    T: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+{
+    let (our_tx, their_rx) = mpsc::channel(24);
+    let (their_tx, mut our_rx) = mpsc::channel(24);
+
+    let socket = Arc::new(socket);
+    let recv_socket = socket.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            match recv_socket.recv_from(&mut buf).await {
+                Ok((len, addr)) => {
+                    match bincode::serde::decode_from_slice(
+                        &buf[..len],
+                        bincode::config::standard(),
+                    ) {
+                        Ok((msg, ..)) => {
+                            if let Err(e) = our_tx.send((msg, addr)).await {
+                                log::warn!("receiver dropped: {e}");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("failed to decode message: {e}");
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("failed to receive from socket: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some((msg, addr)) = our_rx.recv().await {
+            match bincode::serde::encode_to_vec(&msg, bincode::config::standard()) {
+                Ok(bytes) => {
+                    if let Err(e) = socket.send_to(&bytes, &addr).await {
+                        log::warn!("failed to send to {addr}: {e}");
+                    }
+                }
+                Err(e) => {
+                    log::warn!("failed to encode message: {e}");
+                    continue;
+                }
+            }
+        }
+    });
+
+    (their_tx, their_rx)
 }

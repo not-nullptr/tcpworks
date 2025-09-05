@@ -41,11 +41,16 @@ where
                 .new_read(reader);
 
             while let Some(Ok(bytes)) = codec.next().await {
-                if let Ok((msg, ..)) =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                {
-                    if let Err(e) = our_tx.send(msg).await {
-                        eprintln!("Receiver dropped: {e}");
+                match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
+                    Ok((msg, ..)) => {
+                        if let Err(e) = our_tx.send(msg).await {
+                            log::warn!("receiver dropped: {e}");
+                            break;
+                        }
+                    }
+
+                    Err(e) => {
+                        log::warn!("failed to decode message: {e}");
                         break;
                     }
                 }
@@ -58,10 +63,15 @@ where
                 .new_write(writer);
 
             while let Some(msg) = our_rx.recv().await {
-                if let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard())
-                {
-                    if let Err(e) = codec.send(bytes.into()).await {
-                        eprintln!("Sender dropped: {e}");
+                match bincode::serde::encode_to_vec(&msg, bincode::config::standard()) {
+                    Ok(bytes) => {
+                        if let Err(e) = codec.send(bytes.into()).await {
+                            log::warn!("sender dropped: {e}");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("failed to encode message: {e}");
                         break;
                     }
                 }
